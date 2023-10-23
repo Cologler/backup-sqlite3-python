@@ -35,9 +35,12 @@ def _find_old_files(name: str, config: BackupConfig) -> list[str]:
     return []
 
 def backup_sqlite3(name: str, config: BackupConfig) -> None:
+    dest_dir = config['dest_dir']
+    os.makedirs(dest_dir, exist_ok=True)
+
     old_file = _find_old_files(name, config)
     backup_time = datetime.datetime.now().strftime(r'%Y%m%d%H%M%S')
-    new_prefix = os.path.join(config['dest_dir'], f'{name}.{backup_time}')
+    new_prefix = os.path.join(dest_dir, f'{name}.{backup_time}')
 
     db_name_tmp = new_prefix + '.tmp'
     db_name_fin = new_prefix + '.sqlite3'
