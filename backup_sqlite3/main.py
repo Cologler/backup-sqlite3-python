@@ -8,11 +8,14 @@
 import datetime
 import os
 import sqlite3
+import sys
 from contextlib import closing
 from pathlib import Path
 from typing import Annotated, Optional, TypedDict
 
 import typer
+from rich.console import Console
+from rich.progress import Progress
 from yaml import safe_load
 
 
@@ -34,7 +37,13 @@ def _find_old_files(name: str, config: BackupConfig) -> list[str]:
         return backups[:len(backups) - config['retention'] + 1]
     return []
 
-def backup_sqlite3(name: str, config: BackupConfig) -> None:
+def backup_sqlite3(
+        name: str, config: BackupConfig, *,
+        enable_progress_bar: bool = True
+    ) -> None:
+
+    typer.echo(f'Backup task: {name}')
+
     dest_dir = config['dest_dir']
     os.makedirs(dest_dir, exist_ok=True)
 
@@ -52,7 +61,14 @@ def backup_sqlite3(name: str, config: BackupConfig) -> None:
     try:
         with closing(sqlite3.connect(config['db_path'])) as src_db:
             with closing(sqlite3.connect(db_name_tmp)) as dest_db:
-                src_db.backup(dest_db)
+                if enable_progress_bar:
+                    with Progress(console=Console(file=sys.stderr)) as progress:
+                        progress_task = progress.add_task("[cyan]Backuping...", total=1000)
+                        def update_progress(status, remaining, total):
+                            progress.update(progress_task, total=total, completed=(total - remaining))
+                        src_db.backup(dest_db, pages=8192, progress=update_progress)
+                else:
+                    src_db.backup(dest_db)
     except:
         if os.path.exists(db_name_tmp):
             os.remove(db_name_tmp)
