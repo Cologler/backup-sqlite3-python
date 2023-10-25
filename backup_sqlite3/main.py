@@ -11,11 +11,12 @@ import sqlite3
 import sys
 from contextlib import closing
 from pathlib import Path
-from typing import Annotated, Optional, TypedDict
+from typing import Annotated, Optional, TypedDict, NotRequired
 from dataclasses import dataclass
 from functools import cached_property
 
 import typer
+import rich
 from rich.console import Console
 from rich.progress import Progress
 from yaml import safe_load
@@ -25,8 +26,9 @@ DATETIME_FORMAT = r'%Y%m%d%H%M%S'
 
 class BackupConfig(TypedDict):
     db_path: str
-    retention: int
     dest_dir: str
+    retention: NotRequired[int]
+    interval: NotRequired[int]
 
 
 @dataclass
@@ -74,6 +76,11 @@ def backup_sqlite3(
 
     backup_records = list_exists_backups(name, dest_dir_path)
 
+    if isinstance(interval := config.get('interval'), int):
+        if backup_records and now - backup_records[-1].created < datetime.timedelta(seconds=interval):
+            rich.print('  Skipped by [green]interval[/green] options.')
+            return
+
     old_records = _filter_not_retention_files(backup_records, config.get('retention', 1))
 
     backup_time = now.strftime(DATETIME_FORMAT)
@@ -91,7 +98,7 @@ def backup_sqlite3(
             with closing(sqlite3.connect(db_name_tmp)) as dest_db:
                 if enable_progress_bar:
                     with Progress(console=Console(file=sys.stderr)) as progress:
-                        progress_task = progress.add_task("[cyan]Backuping...", total=1000)
+                        progress_task = progress.add_task("  [cyan]Backuping...", total=1000)
                         def update_progress(status, remaining, total):
                             progress.update(progress_task, total=total, completed=(total - remaining))
                         src_db.backup(dest_db, pages=8192, progress=update_progress)
