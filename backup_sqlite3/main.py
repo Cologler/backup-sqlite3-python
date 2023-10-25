@@ -154,17 +154,18 @@ def backup(
     profile_path_str = str(profile_path)
     with profile_path.open() as fp:
         profile_content: dict = safe_load(fp)
+
         if config_name:
             if config_name not in profile_content:
                 typer.echo(f'{config_name} is not in {profile_path}', err=True)
                 raise typer.Exit(code=1)
-            config = profile_content[config_name]
-            preprocess_config(config, profile_path_str)
-            backup_sqlite3(config_name, config, enable_progress_bar=not quite)
+            configs = [(config_name, profile_content[config_name])]
         else:
-            for key, config in profile_content.items():
-                preprocess_config(config, profile_path_str)
-                backup_sqlite3(key, config, enable_progress_bar=not quite)
+            configs = profile_content.items()
+
+        for key, config in configs:
+            preprocess_config(config, profile_path_str)
+            backup_sqlite3(key, config, enable_progress_bar=not quite)
 
 @app.command()
 def restore(
