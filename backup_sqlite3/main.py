@@ -107,7 +107,8 @@ def backup(
             dir_okay=False,
             readable=True
         )],
-        config_name: Annotated[str, typer.Argument()] = None
+        config_name: Annotated[str, typer.Argument()] = None,
+        quite: bool = False,
     ):
 
     if config_name:
@@ -123,11 +124,11 @@ def backup(
                 raise typer.Exit(code=1)
             config = profile_content[config_name]
             preprocess_config(config, profile_path_str)
-            backup_sqlite3(config_name, config)
+            backup_sqlite3(config_name, config, enable_progress_bar=not quite)
         else:
             for key, config in profile_content.items():
                 preprocess_config(config, profile_path_str)
-                backup_sqlite3(key, config)
+                backup_sqlite3(key, config, enable_progress_bar=not quite)
 
 @app.command()
 def restore(
