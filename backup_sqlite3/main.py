@@ -12,11 +12,15 @@ import sys
 from contextlib import closing
 from pathlib import Path
 from typing import Annotated, Optional, TypedDict
+from dataclasses import dataclass
+from functools import cached_property
 
 import typer
 from rich.console import Console
 from rich.progress import Progress
 from yaml import safe_load
+
+DATETIME_FORMAT = r'%Y%m%d%H%M%S'
 
 
 class BackupConfig(TypedDict):
@@ -24,18 +28,36 @@ class BackupConfig(TypedDict):
     retention: int
     dest_dir: str
 
-def list_exists_backups(name: str, config: BackupConfig) -> list[str]:
-    backups = [
-        n for n in os.listdir(config['dest_dir'])
-        if n.startswith(name + '.') and n.endswith('.sqlite3')
-    ]
-    return sorted(backups)
 
-def _find_old_files(name: str, config: BackupConfig) -> list[str]:
-    backups = list_exists_backups(name, config)
-    if len(backups) > config['retention'] - 1:
-        return backups[:len(backups) - config['retention'] + 1]
+@dataclass
+class BackupRecord:
+    path: Path
+    created_in_str: str
+
+    @cached_property
+    def created(self) -> datetime:
+        return datetime.datetime.strptime(self.created_in_str, DATETIME_FORMAT)
+
+
+def list_exists_backups(name: str, backups_location: Path) -> list[BackupRecord]:
+    prefix = name + '.'
+    suffix = '.sqlite3'
+
+    backup_records = [
+        BackupRecord(p, p.stem[len(prefix):]) for p in backups_location.iterdir()
+        if p.stem.startswith(prefix) and p.suffix == suffix
+    ]
+
+    return sorted(backup_records, key=lambda r: r.created_in_str)
+
+
+def _filter_not_retention_files(records: list[BackupRecord], retention: int) -> list[BackupRecord]:
+    if retention < 1:
+        raise ValueError('retention must be greater than 0')
+    if len(records) > retention - 1:
+        return records[:len(records) - retention + 1]
     return []
+
 
 def backup_sqlite3(
         name: str, config: BackupConfig, *,
@@ -45,10 +67,16 @@ def backup_sqlite3(
     typer.echo(f'Backup task: {name}')
 
     dest_dir = config['dest_dir']
-    os.makedirs(dest_dir, exist_ok=True)
+    dest_dir_path = Path(config['dest_dir'])
+    dest_dir_path.mkdir(parents=True, exist_ok=True)
 
-    old_file = _find_old_files(name, config)
-    backup_time = datetime.datetime.now().strftime(r'%Y%m%d%H%M%S')
+    now = datetime.datetime.now() # use local timezone for human readable
+
+    backup_records = list_exists_backups(name, dest_dir_path)
+
+    old_records = _filter_not_retention_files(backup_records, config.get('retention', 1))
+
+    backup_time = now.strftime(DATETIME_FORMAT)
     new_prefix = os.path.join(dest_dir, f'{name}.{backup_time}')
 
     db_name_tmp = new_prefix + '.tmp'
@@ -75,8 +103,9 @@ def backup_sqlite3(
         raise
 
     os.rename(db_name_tmp, db_name_fin)
-    for old in old_file:
-        os.remove(os.path.join(config['dest_dir'], old))
+    for old in old_records:
+        old.path.unlink()
+
 
 def get_absolute_path(working_dir: str, relative_path: str):
     if os.path.isabs(relative_path):
