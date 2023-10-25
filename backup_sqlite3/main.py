@@ -10,13 +10,14 @@ import os
 import sqlite3
 import sys
 from contextlib import closing
-from pathlib import Path
-from typing import Annotated, Optional, TypedDict, NotRequired
 from dataclasses import dataclass
 from functools import cached_property
+from pathlib import Path
+from typing import Annotated, NotRequired, TypedDict
+import shutil
 
-import typer
 import rich
+import typer
 from rich.console import Console
 from rich.progress import Progress
 from yaml import safe_load
@@ -66,7 +67,7 @@ def backup_sqlite3(
         enable_progress_bar: bool = True
     ) -> None:
 
-    typer.echo(f'Backup task: {name}')
+    rich.print(f'Backup task: [green]{name}[/green]')
 
     dest_dir = config['dest_dir']
     dest_dir_path = Path(config['dest_dir'])
@@ -114,10 +115,36 @@ def backup_sqlite3(
         old.path.unlink()
 
 
+def restore_sqlite3(
+        name: str, config: BackupConfig,
+    ) -> None:
+
+    rich.print(f'Restore task: [green]{name}[/green]')
+
+    dest_dir_path = Path(config['dest_dir'])
+    backup_records = list_exists_backups(name, dest_dir_path)
+    if not backup_records:
+        raise FileNotFoundError(f'No backups found for {name}')
+
+    src_db_path = config['db_path']
+    db_name_tmp = Path(src_db_path + '-restoring.tmp')
+    try:
+        shutil.copyfile(backup_records[-1].path, db_name_tmp)
+        # delete order should not change
+        Path(src_db_path + '-shm').unlink(True)
+        Path(src_db_path + '-wal').unlink(True)
+        Path(src_db_path).unlink(True)
+        os.rename(db_name_tmp, src_db_path)
+    except:
+        db_name_tmp.unlink(True)
+        raise
+
+
 def get_absolute_path(working_dir: str, relative_path: str):
     if os.path.isabs(relative_path):
         return relative_path
     return os.path.abspath(os.path.join(working_dir, relative_path))
+
 
 def preprocess_config(config: BackupConfig, profile_path: str) -> BackupConfig:
 
@@ -134,11 +161,13 @@ def preprocess_config(config: BackupConfig, profile_path: str) -> BackupConfig:
 
     return config
 
+
 app = typer.Typer()
+
 
 @app.command()
 def backup(
-        profile: Annotated[Optional[Path], typer.Option(
+        profile: Annotated[Path, typer.Option(
             exists=True,
             dir_okay=False,
             readable=True
@@ -150,30 +179,44 @@ def backup(
     if config_name:
         typer.echo(f'Trying to backup config: {config_name}')
 
-    profile_path = profile.absolute()
-    profile_path_str = str(profile_path)
-    with profile_path.open() as fp:
+    profile_abs = profile.absolute()
+    with profile_abs.open() as fp:
         profile_content: dict = safe_load(fp)
 
-        if config_name:
-            if config_name not in profile_content:
-                typer.echo(f'{config_name} is not in {profile_path}', err=True)
-                raise typer.Exit(code=1)
-            configs = [(config_name, profile_content[config_name])]
-        else:
-            configs = profile_content.items()
+    if config_name:
+        if config_name not in profile_content:
+            typer.echo(f'{config_name} is not in {profile_abs}', err=True)
+            raise typer.Exit(code=1)
+        configs = [(config_name, profile_content[config_name])]
+    else:
+        configs = profile_content.items()
 
-        for key, config in configs:
-            preprocess_config(config, profile_path_str)
-            backup_sqlite3(key, config, enable_progress_bar=not quite)
+    for key, config in configs:
+        preprocess_config(config, str(profile_abs))
+        backup_sqlite3(key, config, enable_progress_bar=not quite)
+
 
 @app.command()
 def restore(
-        profile: Annotated[Optional[Path], typer.Option(
+        profile: Annotated[Path, typer.Option(
             exists=True,
             dir_okay=False,
             readable=True
         )],
         config_name: Annotated[str, typer.Argument()] = None
     ):
-    raise NotImplementedError
+
+    profile_abs = profile.absolute()
+    with profile_abs.open() as fp:
+        profile_content: dict = safe_load(fp)
+
+    if config_name:
+        if config_name not in profile_content:
+            typer.echo(f'{config_name} is not in {profile_abs}', err=True)
+            raise typer.Exit(code=1)
+        configs = [(config_name, profile_content[config_name])]
+    else:
+        configs = profile_content.items()
+
+    for key, config in configs:
+        restore_sqlite3(key, config)
