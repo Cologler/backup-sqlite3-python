@@ -263,4 +263,5 @@ def restore(
         configs = profile_content.items()
 
     for key, config in configs:
+        preprocess_config(config, str(profile_abs))
         restore_sqlite3(key, config)
