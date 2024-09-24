@@ -11,6 +11,7 @@ packages = [{include = "backup_sqlite3"}]
 python = "^3.11"
 pyyaml = "^6.0.1"
 typer = {extras = ["all"], version = "^0.9.0"}
+zstandard = "^0.23.0"
 
 [tool.poetry.scripts]
 backup-sqlite3 = "backup_sqlite3.main:app"

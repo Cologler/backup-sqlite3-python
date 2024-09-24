@@ -7,14 +7,14 @@
 
 import datetime
 import os
+import shutil
 import sqlite3
 import sys
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated, NotRequired, TypedDict
-import shutil
 
 import rich
 import typer
@@ -30,12 +30,14 @@ class BackupConfig(TypedDict):
     dest_dir: str
     retention: NotRequired[int]
     interval: NotRequired[int]
+    compression: NotRequired[bool]
 
 
 @dataclass
 class BackupRecord:
     path: Path
     created_in_str: str
+    is_compressed: bool
 
     @cached_property
     def created(self) -> datetime:
@@ -44,14 +46,15 @@ class BackupRecord:
 
 def list_exists_backups(name: str, backups_location: Path) -> list[BackupRecord]:
     prefix = name + '.'
-    suffix = '.sqlite3'
 
-    backup_records = [
-        BackupRecord(p, p.stem[len(prefix):]) for p in backups_location.iterdir()
-        if p.stem.startswith(prefix) and p.suffix == suffix
-    ]
+    def iter_backup_records():
+        for p in [x for x in backups_location.iterdir() if x.stem.startswith(prefix)]:
+            if p.name.endswith('.sqlite3.zst'):
+                yield BackupRecord(p, p.name[len(prefix):-len('.sqlite3.zst')], True)
+            elif p.name.endswith('.sqlite3'):
+                yield BackupRecord(p, p.name[len(prefix):-len('.sqlite3')], False)
 
-    return sorted(backup_records, key=lambda r: r.created_in_str)
+    return sorted(list(iter_backup_records()), key=lambda r: r.created_in_str)
 
 
 def _filter_not_retention_files(records: list[BackupRecord], retention: int) -> list[BackupRecord]:
@@ -111,6 +114,40 @@ def backup_sqlite3(
         raise
 
     os.rename(db_name_tmp, db_name_fin)
+
+    # compress
+    if config.get('compression', True):
+        import zstandard
+        compressor = zstandard.ZstdCompressor(
+            write_checksum=True
+        )
+        with ExitStack() as es:
+            src = es.enter_context(open(db_name_fin, 'rb'))
+            dest = es.enter_context(open(db_name_fin + '.zst', 'xb'))
+
+            if enable_progress_bar:
+                total_size = os.stat(db_name_fin).st_size
+                progress = es.enter_context(Progress(console=Console(file=sys.stderr)))
+                progress_task = progress.add_task("  [cyan]Compress...", total=total_size)
+
+                def read(size: int):
+                    read = src.read(size)
+                    if read:
+                        progress.update(progress_task, advance=len(read))
+                    return read
+            else:
+                read = src.read
+
+            class Reader:
+                def __init__(self) -> None:
+                    self.read = read
+
+            fileobj = Reader()
+            compressor.copy_stream(fileobj, dest)
+
+        os.unlink(db_name_fin)
+
+    # finally, remove old records
     for old in old_records:
         old.path.unlink()
 
@@ -129,7 +166,14 @@ def restore_sqlite3(
     src_db_path = config['db_path']
     db_name_tmp = Path(src_db_path + '-restoring.tmp')
     try:
-        shutil.copyfile(backup_records[-1].path, db_name_tmp)
+        latest_backup_record = backup_records[-1]
+        if latest_backup_record.is_compressed:
+            import zstandard
+            decompressor = zstandard.ZstdDecompressor()
+            with latest_backup_record.path.open('rb') as src, db_name_tmp.open('xb') as dest:
+                decompressor.copy_stream(src, dest)
+        else:
+            shutil.copyfile(latest_backup_record.path, db_name_tmp)
         # delete order should not change
         Path(src_db_path + '-shm').unlink(True)
         Path(src_db_path + '-wal').unlink(True)

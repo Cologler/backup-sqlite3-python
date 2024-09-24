@@ -27,6 +27,7 @@ ${jobname}:
   dest_dir: "..." # dest location
   retention: 1 # optional value for how many backups to keep
   interval: 1800 # optional seconds for backup only if the previous backup is outdated
+  compression: true # optional value for compress backup with zstd
 ```
 
 The job will create `${jobname}.${time}.sqlite3` on dest location.
