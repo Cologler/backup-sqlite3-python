@@ -137,8 +137,8 @@ def backup_sqlite3(
             progress = nullcontext()
             progress_callback = None
 
-        with progress:
-            compress_zstd(db_name_fin, db_name_fin + '.zst', progress_callback)
+        with progress, open(db_name_fin, 'rb') as src, open(db_name_fin + '.zst', 'xb') as dest:
+            compress_zstd(src, dest, progress_callback)
 
         os.unlink(db_name_fin)
 
@@ -163,7 +163,8 @@ def restore_sqlite3(
     try:
         latest_backup_record = backup_records[-1]
         if latest_backup_record.is_compressed:
-            decompress_zstd(latest_backup_record.path, db_name_tmp, None)
+            with latest_backup_record.path.open('rb') as src, db_name_tmp.open('xb') as dest:
+                decompress_zstd(src, dest, None)
         else:
             shutil.copyfile(latest_backup_record.path, db_name_tmp)
         # delete order should not change

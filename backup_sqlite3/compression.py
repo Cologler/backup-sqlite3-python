@@ -5,8 +5,17 @@
 # 
 # ----------
 
-from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
+
+
+class _BytesReader(Protocol):
+    def read(self, size: int | None) -> bytes:
+        ...
+
+
+class _BytesWriter(Protocol):
+    def write(self, b: bytes) -> int:
+        ...
 
 
 class _Reader:
@@ -22,28 +31,28 @@ class _Reader:
         return cls(read)
 
 
-def compress_zstd(src_path: str, dest_path: str, progress_callback: Callable[[int], None] | None):
+def compress_zstd(src: _BytesReader, dest: _BytesWriter, progress_callback: Callable[[int], None] | None):
     import zstandard
 
     compressor = zstandard.ZstdCompressor(
         write_checksum=True
     )
 
-    with open(src_path, 'rb') as src, open(dest_path, 'xb') as dest:
-        if progress_callback:
-            fileobj = _Reader.wrap_read(src.read, progress_callback)
-        else:
-            fileobj = _Reader(src.read)
-        compressor.copy_stream(fileobj, dest)
+    if progress_callback:
+        fileobj = _Reader.wrap_read(src.read, progress_callback)
+    else:
+        fileobj = _Reader(src.read)
 
-def decompress_zstd(src_path: Path, dest_path: Path, progress_callback: Callable[[int], None] | None):
+    compressor.copy_stream(fileobj, dest)
+
+def decompress_zstd(src: _BytesReader, dest: _BytesWriter, progress_callback: Callable[[int], None] | None):
     import zstandard
 
     decompressor = zstandard.ZstdDecompressor()
 
-    with src_path.open('rb') as src, dest_path.open('xb') as dest:
-        if progress_callback:
-            fileobj = _Reader.wrap_read(src.read, progress_callback)
-        else:
-            fileobj = _Reader(src.read)
-        decompressor.copy_stream(fileobj, dest)
+    if progress_callback:
+        fileobj = _Reader.wrap_read(src.read, progress_callback)
+    else:
+        fileobj = _Reader(src.read)
+
+    decompressor.copy_stream(fileobj, dest)

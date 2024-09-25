@@ -16,6 +16,9 @@ zstandard = "^0.23.0"
 [tool.poetry.scripts]
 backup-sqlite3 = "backup_sqlite3.main:app"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.3"
+
 [tool.poetry-dynamic-versioning]
 enable = true
 [build-system]
