@@ -10,7 +10,7 @@ import os
 import shutil
 import sqlite3
 import sys
-from contextlib import ExitStack, closing
+from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
@@ -21,6 +21,8 @@ import typer
 from rich.console import Console
 from rich.progress import Progress
 from yaml import safe_load
+
+from .compression import compress_zstd, decompress_zstd
 
 DATETIME_FORMAT = r'%Y%m%d%H%M%S'
 
@@ -98,16 +100,22 @@ def backup_sqlite3(
         raise FileExistsError(f'{db_name_fin} already exists')
 
     try:
-        with closing(sqlite3.connect(config['db_path'])) as src_db:
-            with closing(sqlite3.connect(db_name_tmp)) as dest_db:
-                if enable_progress_bar:
-                    with Progress(console=Console(file=sys.stderr)) as progress:
-                        progress_task = progress.add_task("  [cyan]Backuping...", total=1000)
-                        def update_progress(status, remaining, total):
-                            progress.update(progress_task, total=total, completed=(total - remaining))
-                        src_db.backup(dest_db, pages=8192, progress=update_progress)
-                else:
-                    src_db.backup(dest_db)
+
+        with closing(sqlite3.connect(config['db_path'])) as src_db, closing(sqlite3.connect(db_name_tmp)) as dest_db:
+            if enable_progress_bar:
+                backup_pages = 1024 * 8
+                progress = Progress(console=Console(file=sys.stderr))
+                progress_task = progress.add_task("  [cyan]Backuping...", total=1000)
+                def progress_callback(status, remaining, total):
+                    progress.update(progress_task, total=total, completed=(total - remaining))
+            else:
+                backup_pages = -1
+                progress = nullcontext()
+                progress_callback = None
+
+            with progress:
+                src_db.backup(dest_db, pages=backup_pages, progress=progress_callback)
+
     except:
         if os.path.exists(db_name_tmp):
             os.remove(db_name_tmp)
@@ -117,33 +125,20 @@ def backup_sqlite3(
 
     # compress
     if config.get('compression', True):
-        import zstandard
-        compressor = zstandard.ZstdCompressor(
-            write_checksum=True
-        )
-        with ExitStack() as es:
-            src = es.enter_context(open(db_name_fin, 'rb'))
-            dest = es.enter_context(open(db_name_fin + '.zst', 'xb'))
 
-            if enable_progress_bar:
-                total_size = os.stat(db_name_fin).st_size
-                progress = es.enter_context(Progress(console=Console(file=sys.stderr)))
-                progress_task = progress.add_task("  [cyan]Compress...", total=total_size)
+        if enable_progress_bar:
+            progress = Progress(console=Console(file=sys.stderr))
+            total_size = os.stat(db_name_fin).st_size
+            progress_task = progress.add_task("  [cyan]Compress...", total=total_size)
 
-                def read(size: int):
-                    read = src.read(size)
-                    if read:
-                        progress.update(progress_task, advance=len(read))
-                    return read
-            else:
-                read = src.read
+            def progress_callback(read_size: int):
+                progress.update(progress_task, advance=read_size)
+        else:
+            progress = nullcontext()
+            progress_callback = None
 
-            class Reader:
-                def __init__(self) -> None:
-                    self.read = read
-
-            fileobj = Reader()
-            compressor.copy_stream(fileobj, dest)
+        with progress:
+            compress_zstd(db_name_fin, db_name_fin + '.zst', progress_callback)
 
         os.unlink(db_name_fin)
 
@@ -168,10 +163,7 @@ def restore_sqlite3(
     try:
         latest_backup_record = backup_records[-1]
         if latest_backup_record.is_compressed:
-            import zstandard
-            decompressor = zstandard.ZstdDecompressor()
-            with latest_backup_record.path.open('rb') as src, db_name_tmp.open('xb') as dest:
-                decompressor.copy_stream(src, dest)
+            decompress_zstd(latest_backup_record.path, db_name_tmp, None)
         else:
             shutil.copyfile(latest_backup_record.path, db_name_tmp)
         # delete order should not change
