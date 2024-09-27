@@ -69,10 +69,13 @@ def _filter_not_retention_files(records: list[BackupRecord], retention: int) -> 
 
 def backup_sqlite3(
         name: str, config: BackupConfig, *,
-        enable_progress_bar: bool = True
+        enable_progress_bar: bool = True,
+        dryrun: bool = False,
     ) -> None:
 
-    rich.print(f'Backup task: [green]{name}[/green]')
+    dryrun_prefix: str = '[yellow](dryrun)[/] ' if dryrun else ''
+
+    rich.print(f'Backup task: [green]{name}[/]')
 
     dest_dir = config['dest_dir']
     dest_dir_path = Path(config['dest_dir'])
@@ -84,7 +87,7 @@ def backup_sqlite3(
 
     if isinstance(interval := config.get('interval'), int):
         if backup_records and now - backup_records[-1].created < datetime.timedelta(seconds=interval):
-            rich.print('  Skipped by [green]interval[/green] options.')
+            rich.print('  Skipped by [blue]interval[/] options.')
             return
 
     old_records = _filter_not_retention_files(backup_records, config.get('retention', 1))
@@ -99,52 +102,56 @@ def backup_sqlite3(
     if os.path.exists(db_name_fin):
         raise FileExistsError(f'{db_name_fin} already exists')
 
-    try:
+    if dryrun:
+        rich.print(f'  {dryrun_prefix}Backup to [blue]{db_name_fin}[/]')
+    else:
+        try:
+            with closing(sqlite3.connect(config['db_path'])) as src_db, closing(sqlite3.connect(db_name_tmp)) as dest_db:
+                if enable_progress_bar:
+                    backup_pages = 1024 * 8
+                    progress = Progress(console=Console(file=sys.stderr))
+                    progress_task = progress.add_task("  [cyan]Backuping...", total=1000)
+                    def progress_callback(status, remaining, total):
+                        progress.update(progress_task, total=total, completed=(total - remaining))
+                else:
+                    backup_pages = -1
+                    progress = nullcontext()
+                    progress_callback = None
 
-        with closing(sqlite3.connect(config['db_path'])) as src_db, closing(sqlite3.connect(db_name_tmp)) as dest_db:
-            if enable_progress_bar:
-                backup_pages = 1024 * 8
-                progress = Progress(console=Console(file=sys.stderr))
-                progress_task = progress.add_task("  [cyan]Backuping...", total=1000)
-                def progress_callback(status, remaining, total):
-                    progress.update(progress_task, total=total, completed=(total - remaining))
-            else:
-                backup_pages = -1
-                progress = nullcontext()
-                progress_callback = None
-
-            with progress:
-                src_db.backup(dest_db, pages=backup_pages, progress=progress_callback)
-
-    except:
-        if os.path.exists(db_name_tmp):
-            os.remove(db_name_tmp)
-        raise
-
-    os.rename(db_name_tmp, db_name_fin)
+                with progress:
+                    src_db.backup(dest_db, pages=backup_pages, progress=progress_callback)
+        except:
+            if os.path.exists(db_name_tmp):
+                os.remove(db_name_tmp)
+            raise
+        os.rename(db_name_tmp, db_name_fin)
 
     # compress
     if config.get('compression', True):
-
-        if enable_progress_bar:
-            progress = Progress(console=Console(file=sys.stderr))
-            total_size = os.stat(db_name_fin).st_size
-            progress_task = progress.add_task("  [cyan]Compress...", total=total_size)
-
-            def progress_callback(read_size: int):
-                progress.update(progress_task, advance=read_size)
+        if dryrun:
+            rich.print(f'  {dryrun_prefix}Compress to [blue]{db_name_fin}.zst[/]')
         else:
-            progress = nullcontext()
-            progress_callback = None
+            if enable_progress_bar:
+                progress = Progress(console=Console(file=sys.stderr))
+                total_size = os.stat(db_name_fin).st_size
+                progress_task = progress.add_task("  [cyan]Compress...", total=total_size)
 
-        with progress, open(db_name_fin, 'rb') as src, open(db_name_fin + '.zst', 'xb') as dest:
-            compress_zstd(src, dest, progress_callback)
+                def progress_callback(read_size: int):
+                    progress.update(progress_task, advance=read_size)
+            else:
+                progress = nullcontext()
+                progress_callback = None
 
-        os.unlink(db_name_fin)
+            with progress, open(db_name_fin, 'rb') as src, open(db_name_fin + '.zst', 'xb') as dest:
+                compress_zstd(src, dest, progress_callback)
+
+            os.unlink(db_name_fin)
 
     # finally, remove old records
     for old in old_records:
-        old.path.unlink()
+        rich.print(f'  {dryrun_prefix}Remove old backup: [blue]{old.path}[/]')
+        if not dryrun:
+            old.path.unlink()
 
 
 def restore_sqlite3(
@@ -184,18 +191,10 @@ def get_absolute_path(working_dir: str, relative_path: str):
 
 
 def preprocess_config(config: BackupConfig, profile_path: str) -> BackupConfig:
-
-    config['db_path'] = get_absolute_path(
-        os.path.dirname(profile_path),
-        os.path.expandvars(config['db_path'])
-    )
-
     assert os.path.isabs(profile_path)
-    config['dest_dir'] = get_absolute_path(
-        os.path.dirname(profile_path),
-        os.path.expandvars(config['dest_dir'])
-    )
-
+    working_dir = os.path.dirname(profile_path)
+    config['db_path'] = get_absolute_path(working_dir, os.path.expandvars(config['db_path']))
+    config['dest_dir'] = get_absolute_path(working_dir, os.path.expandvars(config['dest_dir']))
     return config
 
 
@@ -211,6 +210,7 @@ def backup(
         )],
         config_name: Annotated[str, typer.Argument()] = None,
         quite: bool = False,
+        dryrun: Annotated[bool, typer.Option('--dryrun')] = False,
     ):
 
     if config_name:
@@ -230,7 +230,7 @@ def backup(
 
     for key, config in configs:
         preprocess_config(config, str(profile_abs))
-        backup_sqlite3(key, config, enable_progress_bar=not quite)
+        backup_sqlite3(key, config, enable_progress_bar=not quite, dryrun=dryrun)
 
 
 @app.command()
