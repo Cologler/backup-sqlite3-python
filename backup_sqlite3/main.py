@@ -263,7 +263,7 @@ def backup(
         )],
         config_name: Annotated[str, typer.Argument()] = None,
         quite: bool = False,
-        dryrun: Annotated[bool, typer.Option('--dryrun')] = False,
+        dry_run: Annotated[bool, typer.Option('--dry-run')] = False,
     ):
 
     if config_name:
@@ -283,7 +283,7 @@ def backup(
 
     for key, config in configs:
         preprocess_config(config, str(profile_abs))
-        backup_sqlite3(key, config, enable_progress_bar=not quite, dry_run=dryrun)
+        backup_sqlite3(key, config, enable_progress_bar=not quite, dry_run=dry_run)
 
 
 @app.command()
