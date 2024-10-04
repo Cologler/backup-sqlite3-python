@@ -10,14 +10,16 @@ import os
 import shutil
 import sqlite3
 import sys
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, contextmanager
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated, NotRequired, TypedDict
+import io
 
 import rich
 import typer
+import portalocker
 from rich.console import Console
 from rich.progress import Progress
 from yaml import safe_load
@@ -67,19 +69,74 @@ def _filter_not_retention_files(records: list[BackupRecord], retention: int) -> 
     return []
 
 
+@contextmanager
+def _tempfile_to_write(path: Path):
+    '''
+    Execute as a context manager, returns a temporary file path to write.
+
+    If an exception is raised, the temporary file will be deleted.
+    If execution without exception, the temporary file will be renamed to the original path.
+    '''
+    tmp_path = path.with_suffix(path.suffix + '.tmp')
+    tmp_path.unlink(missing_ok=True)
+    try:
+        yield tmp_path
+    except Exception:
+        raise
+    else:
+        if tmp_path.exists():
+            tmp_path.rename(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _backup_with_sqlite_backup(src_db_path: Path, dest_db_path: Path, *, enable_progress_bar):
+    with closing(sqlite3.connect(str(src_db_path))) as src_db, closing(sqlite3.connect(str(dest_db_path))) as dest_db:
+        if enable_progress_bar:
+            backup_pages = 1024 * 8
+            progress = Progress(console=Console(file=sys.stderr))
+            progress_task = progress.add_task("  [cyan]SQLite.backuping...", total=1000)
+            def progress_callback(status, remaining, total):
+                progress.update(progress_task, total=total, completed=(total - remaining))
+        else:
+            backup_pages = -1
+            progress = nullcontext()
+            progress_callback = None
+
+        with progress:
+            src_db.backup(dest_db, pages=backup_pages, progress=progress_callback)
+
+
+def _compress_with_zstd(src_fp: io.BufferedReader, src_size: int, dest_path: Path, *, enable_progress_bar):
+    if enable_progress_bar:
+        progress = Progress(console=Console(file=sys.stderr))
+        progress_task = progress.add_task("  [cyan]Compress...", total=src_size)
+
+        def progress_callback(read_size: int):
+            progress.update(progress_task, advance=read_size)
+    else:
+        progress = nullcontext()
+        progress_callback = None
+
+    with progress, dest_path.open('xb') as dest:
+        compress_zstd(src_fp, dest, progress_callback)
+
+
 def backup_sqlite3(
         name: str, config: BackupConfig, *,
         enable_progress_bar: bool = True,
-        dryrun: bool = False,
+        dry_run: bool = False,
     ) -> None:
 
-    dryrun_prefix: str = '[yellow](dryrun)[/] ' if dryrun else ''
+    dryrun_prefix: str = '[yellow](dryrun)[/] ' if dry_run else ''
 
     rich.print(f'Backup task: [green]{name}[/]')
 
+    # load config
     dest_dir = config['dest_dir']
     dest_dir_path = Path(config['dest_dir'])
     dest_dir_path.mkdir(parents=True, exist_ok=True)
+    do_compress = config.get('compression', True)
 
     now = datetime.datetime.now() # use local timezone for human readable
 
@@ -94,63 +151,59 @@ def backup_sqlite3(
 
     backup_time = now.strftime(DATETIME_FORMAT)
     new_prefix = os.path.join(dest_dir, f'{name}.{backup_time}')
+    backup_path_final = Path(new_prefix + '.sqlite3')
+    if do_compress:
+        backup_path_final = backup_path_final.with_name(backup_path_final.name + '.zst')
 
-    db_name_tmp = new_prefix + '.tmp'
-    db_name_fin = new_prefix + '.sqlite3'
-    if os.path.exists(db_name_tmp):
-        raise FileExistsError(f'{db_name_tmp} already exists')
-    if os.path.exists(db_name_fin):
-        raise FileExistsError(f'{db_name_fin} already exists')
+    if backup_path_final.exists():
+        raise FileExistsError(f'The finally backup file already exists: {backup_path_final}')
 
-    if dryrun:
-        rich.print(f'  {dryrun_prefix}Backup to [blue]{db_name_fin}[/]')
+    if dry_run:
+        action = 'Backup'
+        if do_compress:
+            action += ' and Compress'
+        rich.print(f'  {dryrun_prefix}{action} to [blue]{backup_path_final}[/]')
+
     else:
-        try:
-            with closing(sqlite3.connect(config['db_path'])) as src_db, closing(sqlite3.connect(db_name_tmp)) as dest_db:
-                if enable_progress_bar:
-                    backup_pages = 1024 * 8
-                    progress = Progress(console=Console(file=sys.stderr))
-                    progress_task = progress.add_task("  [cyan]Backuping...", total=1000)
-                    def progress_callback(status, remaining, total):
-                        progress.update(progress_task, total=total, completed=(total - remaining))
-                else:
-                    backup_pages = -1
-                    progress = nullcontext()
-                    progress_callback = None
+        with _tempfile_to_write(backup_path_final) as backup_path:
+            src_db_path = Path(config['db_path'])
 
-                with progress:
-                    src_db.backup(dest_db, pages=backup_pages, progress=progress_callback)
-        except:
-            if os.path.exists(db_name_tmp):
-                os.remove(db_name_tmp)
-            raise
-        os.rename(db_name_tmp, db_name_fin)
+            if not do_compress:
+                # backup
+                _backup_with_sqlite_backup(src_db_path, backup_path, enable_progress_bar=enable_progress_bar)
 
-    # compress
-    if config.get('compression', True):
-        if dryrun:
-            rich.print(f'  {dryrun_prefix}Compress to [blue]{db_name_fin}.zst[/]')
-        else:
-            if enable_progress_bar:
-                progress = Progress(console=Console(file=sys.stderr))
-                total_size = os.stat(db_name_fin).st_size
-                progress_task = progress.add_task("  [cyan]Compress...", total=total_size)
-
-                def progress_callback(read_size: int):
-                    progress.update(progress_task, advance=read_size)
             else:
-                progress = nullcontext()
-                progress_callback = None
+                # backup and compress
+                # try lock origin file:
+                try:
+                    with src_db_path.open('rb') as src_fp:
+                        portalocker.lock(src_fp, portalocker.LOCK_NB)
+                        rich.print('  Locked original database.')
+                        # ensure sqlite -wal file does not exist
+                        if src_db_path.with_suffix(src_db_path.suffix + '-wal').exists():
+                            rich.print('  WAL file exists, fallback to SQLite.backup.')
+                        else:
+                            rich.print('  Compress database from original.')
+                            _compress_with_zstd(src_fp, src_db_path.stat().st_size, backup_path, enable_progress_bar=enable_progress_bar)
+                except portalocker.LockException:
+                    rich.print('  Failed to lock the original database, fallback to SQLite.backup.')
 
-            with progress, open(db_name_fin, 'rb') as src, open(db_name_fin + '.zst', 'xb') as dest:
-                compress_zstd(src, dest, progress_callback)
+                if not backup_path.is_file():
+                    # fallback to backup
+                    mid_db_path = backup_path.with_suffix(backup_path.suffix + '.mid.tmp')
+                    try:
+                        _backup_with_sqlite_backup(src_db_path, mid_db_path, enable_progress_bar=enable_progress_bar)
+                        _compress_with_zstd(mid_db_path, backup_path, enable_progress_bar=enable_progress_bar)
+                    finally:
+                        mid_db_path.unlink(missing_ok=True)
 
-            os.unlink(db_name_fin)
+        if backup_path_final.is_file():
+            rich.print(f'  Backup is created: [blue]{backup_path_final}[/]')
 
     # finally, remove old records
     for old in old_records:
         rich.print(f'  {dryrun_prefix}Remove old backup: [blue]{old.path}[/]')
-        if not dryrun:
+        if not dry_run:
             old.path.unlink()
 
 
@@ -230,7 +283,7 @@ def backup(
 
     for key, config in configs:
         preprocess_config(config, str(profile_abs))
-        backup_sqlite3(key, config, enable_progress_bar=not quite, dryrun=dryrun)
+        backup_sqlite3(key, config, enable_progress_bar=not quite, dry_run=dryrun)
 
 
 @app.command()
