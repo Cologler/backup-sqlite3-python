@@ -193,7 +193,7 @@ def backup_sqlite3(
                     mid_db_path = backup_path.with_suffix(backup_path.suffix + '.mid.tmp')
                     try:
                         _backup_with_sqlite_backup(src_db_path, mid_db_path, enable_progress_bar=enable_progress_bar)
-                        _compress_with_zstd(mid_db_path, backup_path, enable_progress_bar=enable_progress_bar)
+                        _compress_with_zstd(mid_db_path, mid_db_path.stat().st_size, backup_path, enable_progress_bar=enable_progress_bar)
                     finally:
                         mid_db_path.unlink(missing_ok=True)
 
