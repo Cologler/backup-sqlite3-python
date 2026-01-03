@@ -44,7 +44,7 @@ class BackupRecord:
     is_compressed: bool
 
     @cached_property
-    def created(self) -> datetime:
+    def created(self) -> datetime.datetime:
         return datetime.datetime.strptime(self.created_in_str, DATETIME_FORMAT)
 
 
@@ -263,7 +263,7 @@ def backup(
             readable=True
         )],
         config_name: Annotated[str, typer.Argument()] = None,
-        quite: bool = False,
+        quite: Annotated[bool, typer.Option('--quiet')] = False,
         dry_run: Annotated[bool, typer.Option('--dry-run')] = False,
     ):
 
